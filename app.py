@@ -16,6 +16,127 @@ st.set_page_config(
 )
 
 # --------------------------
+# CSS personalizado
+# --------------------------
+st.markdown("""
+<style>
+    /* Estilos generales */
+    .main-title {
+        font-size: 42px !important;
+        text-align: center;
+        color: #1E3A8A;
+        padding: 20px;
+        border-bottom: 4px solid #2563EB;
+        margin-bottom: 25px;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .part-number {
+        font-weight: bold;
+        color: #1E40AF;
+        background-color: #DBEAFE;
+        padding: 5px 10px;
+        border-radius: 5px;
+    }
+    
+    .container-count {
+        font-size: 24px;
+        font-weight: bold;
+        color: #991B1B;
+        background-color: #FEE2E2;
+        padding: 5px 15px;
+        border-radius: 10px;
+        display: inline-block;
+        margin: 5px 0;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+    }
+    
+    .priority-box {
+        background-color: #F3F4F6;
+        border-left: 5px solid #3B82F6;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 10px 0;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    
+    .priority-1 {
+        border-left-color: #DC2626;
+    }
+    
+    .priority-2 {
+        border-left-color: #F59E0B;
+    }
+    
+    .priority-3 {
+        border-left-color: #10B981;
+    }
+    
+    .info-message {
+        background-color: #EFF6FF;
+        border: 1px solid #BFDBFE;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 25px 0;
+        display: flex;
+        align-items: center;
+        font-size: 16px;
+    }
+    
+    .icon-container {
+        font-size: 24px;
+        margin-right: 15px;
+    }
+    
+    /* Mejorar tabla de datos */
+    div[data-testid="stDataFrame"] {
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        border-radius: 10px;
+        overflow: hidden;
+    }
+    
+    .stDataFrame table {
+        border-collapse: separate;
+        border-spacing: 0;
+    }
+    
+    .stDataFrame th {
+        background-color: #1E40AF;
+        color: white;
+        font-weight: bold;
+        text-transform: uppercase;
+    }
+    
+    .stDataFrame tbody tr:hover {
+        background-color: rgba(219, 234, 254, 0.5);
+    }
+    
+    /* Mejorar sidebar */
+    section[data-testid="stSidebar"] {
+        background-color: #F8FAFC;
+        border-right: 1px solid #E2E8F0;
+        padding-top: 20px;
+    }
+    
+    section[data-testid="stSidebar"] button {
+        background-color: #2563EB;
+        color: white;
+        border-radius: 5px;
+        padding: 10px 15px;
+        font-weight: bold;
+        border: none;
+        box-shadow: 0 4px 6px rgba(37, 99, 235, 0.2);
+        transition: all 0.3s ease;
+    }
+    
+    section[data-testid="stSidebar"] button:hover {
+        background-color: #1D4ED8;
+        box-shadow: 0 6px 8px rgba(29, 78, 216, 0.3);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --------------------------
 # Constantes
 # --------------------------
 PRP_URL = "https://drive.google.com/file/d/1TxKmxwy8QnUnTQTee77LgyooR_Fq1AGu/view?usp=drive_link"
@@ -400,7 +521,10 @@ def compute_shortages(base_df, demand_df, date_range=None):
         # Calcular capacidad por turno
         rate = part_info['Rate'] if 'Rate' in part_info else 100
         capacity_pcs = rate / 100 * 22.5
-        capacity_cont = 0 if pd.isna(pack) or pack <= 0 else math.floor(capacity_pcs / pack)
+        
+        # Manejar casos especiales para pack
+        valid_pack = False if pd.isna(pack) else (pack > 0)
+        capacity_cont = 0 if not valid_pack else math.floor(capacity_pcs / pack)
         
         # Banderas para optimización
         is_first_shortage = True
@@ -529,7 +653,8 @@ def render_sequence(priority_df, date):
 # UI
 # --------------------------
 def main():
-    st.title("PRÓXIMOS 3 NÚMEROS DE PARTE A PRODUCIR")
+    # Título con diseño mejorado
+    st.markdown('<h1 class="main-title">📦 PRÓXIMOS 3 NÚMEROS DE PARTE A PRODUCIR 📦</h1>', unsafe_allow_html=True)
     
     # Sidebar
     st.sidebar.header("Configuración")
@@ -544,12 +669,23 @@ def main():
     prp_df, prp_timestamp, date_cols = load_prp()
     live_df, live_timestamp = load_live()
     
-    # Mostrar solo última actualización
-    st.sidebar.subheader("Última actualización")
-    st.sidebar.info(f"{datetime.now().strftime('%d-%m-%Y %H:%M')}")
+    # Sidebar con diseño mejorado
+    st.sidebar.markdown("### 🕒 Información del Sistema")
     
-    # Botón para actualizar datos manualmente
-    if st.sidebar.button("Actualizar datos ahora"):
+    # Mostrar fecha y hora actual con mejor formato
+    current_time = datetime.now().strftime('%d-%m-%Y %H:%M')
+    st.sidebar.markdown(f"**Última actualización:**")
+    st.sidebar.markdown(f"<div style='background-color: #DBEAFE; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold;'>{current_time}</div>", unsafe_allow_html=True)
+    
+    # Separador visual
+    st.sidebar.markdown("<hr>", unsafe_allow_html=True)
+    
+    # Logo o imagen (opcional)
+    st.sidebar.markdown("### 🏭 Sistema de Producción")
+    
+    # Botón para actualizar datos con mejor estilo
+    st.sidebar.markdown("<br>", unsafe_allow_html=True)
+    if st.sidebar.button("🔄 Actualizar Datos Ahora"):
         st.cache_data.clear()
         st.experimental_rerun()
     
@@ -616,7 +752,7 @@ def main():
                 styled_df = display_df.style.apply(highlight_row, axis=1)
                 
                 # Mostrar solo los próximos 3 números de parte
-                st.subheader("PRÓXIMOS 3 NÚMEROS DE PARTE A PRODUCIR")
+                st.markdown("### 🚨 Prioridad de Producción 🚨")
                 
                 # Agrupar por número de parte y sumar los contenedores
                 grouped_df = display_df.groupby(['Número de Parte', 'Descripción']).agg({
@@ -629,29 +765,66 @@ def main():
                 # Limitamos a los primeros 3 números de parte
                 limited_df = grouped_df.head(3).copy()
                 
-                # Mostrar la tabla limitada
+                # Crear métricas para mostrar los datos de manera más visual
+                if not limited_df.empty:
+                    col1, col2, col3 = st.columns(3)
+                    
+                    # Mostrar cada parte en una columna con estilo
+                    for idx, (_, row) in enumerate(limited_df.iterrows()):
+                        with [col1, col2, col3][min(idx, 2)]:
+                            part_no = row['Número de Parte']
+                            description = row['Descripción']
+                            containers = int(row['Contenedores a Producir'])
+                            
+                            st.markdown(f"""
+                            <div class='priority-box priority-{idx+1}'>
+                                <h3>Prioridad #{idx+1}</h3>
+                                <p><span class='part-number'>{part_no}</span></p>
+                                <p>{description}</p>
+                                <div class='container-count'>📦 {containers} Contenedores</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                
+                # Mostrar también la tabla para tener los datos estructurados
+                st.markdown("### 📋 Detalle de Producción")
                 st.dataframe(limited_df[['Número de Parte', 'Descripción', 'Contenedores a Producir']].style.apply(highlight_row, axis=1), hide_index=True)
                 
-                # Secuencia simplificada (texto)
+                # Instrucciones para operadores con iconos
+                st.markdown("### 🔄 Secuencia de Producción")
+                
+                # Mensaje con iconos para operadores
                 secuencia_texto = []
                 
-                # Mostrar los 3 números de parte y cuántos contenedores
                 for i, (_, row) in enumerate(limited_df.iterrows(), 1):
                     if i > 3:  # Limitar a solo 3 números de parte
                         break
                         
                     current_part = row['Número de Parte']
-                    secuencia_texto.append(
-                        f"{i}. Producir **{int(row['Contenedores a Producir'])}** contenedores de **{current_part}** - {row['Descripción']}"
-                    )
+                    icon = "🔴" if i == 1 else "🟡" if i == 2 else "🟢"
+                    
+                    secuencia_texto.append(f"""
+                    <div class='priority-box priority-{i}'>
+                        <h4>{icon} Paso {i}</h4>
+                        <p>Producir <span class='container-count'>{int(row['Contenedores a Producir'])}</span> contenedores de 
+                        <span class='part-number'>{current_part}</span></p>
+                        <p><em>{row['Descripción']}</em></p>
+                    </div>
+                    """)
                 
                 if secuencia_texto:
-                    st.write("Plan de producción actual:")
                     for texto in secuencia_texto:
-                        st.markdown(texto)
+                        st.markdown(texto, unsafe_allow_html=True)
                     
-                    # Nota sobre actualización automática
-                    st.info("Los datos se actualizan automáticamente cada 30 minutos. Puede usar el botón 'Actualizar datos ahora' en el panel lateral para forzar una actualización inmediata.")
+                    # Nota sobre actualización automática con icono
+                    st.markdown("""
+                    <div class='info-message'>
+                        <div class='icon-container'>ℹ️</div>
+                        <div>
+                            <strong>Nota:</strong> Los datos se actualizan automáticamente cada 30 minutos. 
+                            Use el botón <strong>🔄 Actualizar Datos Ahora</strong> en el panel lateral para forzar una actualización inmediata.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
                 else:
                     st.warning("No hay contenedores para producir.")
                 
@@ -679,5 +852,15 @@ def main():
     else:
         st.error("Faltan datos críticos para el procesamiento.")
 
+# Pie de página con información de versión
+def footer():
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style='position: fixed; bottom: 0; left: 0; right: 0; background-color: #F8FAFC; padding: 10px; text-align: center; border-top: 1px solid #E2E8F0; font-size: 12px; color: #64748B;'>
+        Sistema de Producción v1.2 | © 2025 | Última actualización: 10-09-2025
+    </div>
+    """, unsafe_allow_html=True)
+
 if __name__ == "__main__":
     main()
+    footer()
