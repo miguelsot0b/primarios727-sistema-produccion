@@ -353,7 +353,8 @@ def process_data(ref_df, prp_df, live_df, date_cols, parts_ref):
 
 @st.cache_data(ttl=1800)
 def compute_shortages(base_df, demand_df, date_range=None):
-    """Calcula faltantes y contenedores a producir en orden cronológico para cubrir todos los embarques."""
+    """Calcula faltantes y contenedores a producir en orden cronológico para cubrir todos los embarques,
+    optimizando la producción para eficiencia."""
     if base_df.empty or demand_df.empty:
         return pd.DataFrame()
     
@@ -370,59 +371,80 @@ def compute_shortages(base_df, demand_df, date_range=None):
     # Lista para almacenar los resultados
     shortage_results = []
     
-    # Procesar cada fila de demanda en orden cronológico
+    # Agrupar por número de parte para seguir la demanda acumulada
+    part_grouped_demand = {}
     for _, row in demand_df.iterrows():
         part_no = row['Part No']
         date = row['Fecha']
         demand = row['Demanda_pzs']
         
+        if part_no not in part_grouped_demand:
+            part_grouped_demand[part_no] = []
+            
+        part_grouped_demand[part_no].append((date, demand))
+    
+    # Para cada parte, procesar sus embarques en secuencia
+    for part_no, demands in part_grouped_demand.items():
         # Si la parte no está en nuestro inventario, continuamos
         if part_no not in current_inventory:
             continue
-        
+            
         # Obtener información de la parte desde base_df
+        if part_no not in base_df['Part No'].values:
+            continue
+            
         part_info = base_df[base_df['Part No'] == part_no].iloc[0]
-        
-        # Calcular faltante
         inventory = current_inventory[part_no]
-        shortage = max(0, demand - inventory)
+        pack = part_info['pack']
         
-        # Si hay faltante, necesitamos producir
-        if shortage > 0:
-            # Calcular contenedores necesarios
-            pack = part_info['pack']
-            if pd.isna(pack) or pack <= 0:
-                containers = np.nan  # No podemos calcular contenedores sin pack
+        # Calcular capacidad por turno
+        rate = part_info['Rate'] if 'Rate' in part_info else 100
+        capacity_pcs = rate / 100 * 22.5
+        capacity_cont = 0 if pd.isna(pack) or pack <= 0 else math.floor(capacity_pcs / pack)
+        
+        # Banderas para optimización
+        is_first_shortage = True
+        
+        # Procesar cada embarque para esta parte
+        for date, demand in demands:
+            # Calcular faltante
+            shortage = max(0, demand - inventory)
+            
+            # Si hay faltante, necesitamos producir
+            if shortage > 0:
+                # Calcular contenedores necesarios
+                if pd.isna(pack) or pack <= 0:
+                    containers = np.nan  # No podemos calcular contenedores sin pack
+                else:
+                    containers = math.ceil(shortage / pack)
+                
+                # Crear registro de faltante
+                shortage_row = {
+                    'Part No': part_no,
+                    'Fecha_Embarque': date,
+                    'Inventario_Actual': inventory,
+                    'Demanda_pzs': demand,
+                    'Faltante_pzs': shortage,
+                    'pack': pack,
+                    'Contenedores_a_producir': containers,
+                    'Cliente': part_info['Cliente'],
+                    'Descripcion': part_info['Descripcion'] if 'Descripcion' in part_info else 'N/A',
+                    'Rate': rate,
+                    'Capacidad_turno_cont': capacity_cont,
+                    'Es_primer_faltante': is_first_shortage,  # Para priorizar faltantes inmediatos
+                    'Siguiente_embarque': not is_first_shortage  # Para saber que es un embarque futuro
+                }
+                
+                shortage_results.append(shortage_row)
+                
+                # Ya no es el primer faltante para esta parte
+                is_first_shortage = False
+                
+                # Actualizar el inventario después de este embarque (lo dejamos en 0)
+                inventory = 0
             else:
-                containers = math.ceil(shortage / pack)
-            
-            # Calcular capacidad por turno
-            rate = part_info['Rate'] if 'Rate' in part_info else 100
-            capacity_pcs = rate / 100 * 22.5
-            capacity_cont = 0 if pd.isna(pack) or pack <= 0 else math.floor(capacity_pcs / pack)
-            
-            # Crear registro de faltante
-            shortage_row = {
-                'Part No': part_no,
-                'Fecha_Embarque': date,
-                'Inventario_Actual': inventory,
-                'Demanda_pzs': demand,
-                'Faltante_pzs': shortage,
-                'pack': pack,
-                'Contenedores_a_producir': containers,
-                'Cliente': part_info['Cliente'],
-                'Descripcion': part_info['Descripcion'] if 'Descripcion' in part_info else 'N/A',
-                'Rate': rate,
-                'Capacidad_turno_cont': capacity_cont
-            }
-            
-            shortage_results.append(shortage_row)
-            
-            # Actualizar el inventario después de este embarque (lo dejamos en 0)
-            current_inventory[part_no] = 0
-        else:
-            # Actualizar el inventario restante después de este embarque
-            current_inventory[part_no] = inventory - demand
+                # Actualizar el inventario restante después de este embarque
+                inventory = inventory - demand
     
     # Convertir los resultados a DataFrame
     if not shortage_results:
@@ -442,20 +464,38 @@ def compute_shortages(base_df, demand_df, date_range=None):
 
 @st.cache_data(ttl=1800)
 def build_priority(shortage_df):
-    """Construye la tabla priorizada para cubrir los embarques en secuencia cronológica."""
+    """Construye la tabla priorizada para cubrir embarques de manera eficiente:
+    1. Primero cubrir los faltantes inmediatos
+    2. Seguir con el mismo número de parte hasta cubrir el siguiente embarque
+    3. Luego pasar a otras partes por orden de cliente y fecha"""
     if shortage_df.empty:
         return pd.DataFrame()
     
     # Crear columna de prioridad de cliente
     shortage_df['cliente_priority'] = shortage_df['Cliente'].apply(customer_priority)
     
-    # Primero ordenar por fecha de embarque (cronológicamente)
-    # Luego por cliente (FORD primero)
-    # Finalmente por volumen (más contenedores primero)
-    priority_df = shortage_df.sort_values(
-        by=['Fecha_Embarque', 'cliente_priority', 'Contenedores_a_producir'],
-        ascending=[True, True, False]
-    )
+    # Agregar columna de continuidad para mantener la misma parte
+    # Agrupar por número de parte para crear un ID único de prioridad por parte
+    part_priority = {}
+    for i, part in enumerate(shortage_df['Part No'].unique()):
+        part_priority[part] = i
+    
+    shortage_df['part_priority'] = shortage_df['Part No'].map(part_priority)
+    
+    # Primero los faltantes inmediatos (para embarque actual)
+    # Luego ordenar para completar la misma parte (eficiencia)
+    # Después por cliente y fecha para otros embarques
+    if 'Es_primer_faltante' in shortage_df.columns:
+        priority_df = shortage_df.sort_values(
+            by=['Es_primer_faltante', 'part_priority', 'cliente_priority', 'Fecha_Embarque'],
+            ascending=[False, True, True, True]
+        )
+    else:
+        # Fallback a la ordenación básica si no tenemos la columna de optimización
+        priority_df = shortage_df.sort_values(
+            by=['cliente_priority', 'Fecha_Embarque', 'Part No'],
+            ascending=[True, True, True]
+        )
     
     return priority_df
 
@@ -542,20 +582,25 @@ def main():
                 # Dashboard simplificado
                 st.header("Plan de Producción de Contenedores")
                 
-                # Columnas a mostrar en el dashboard simplificado (enfocado solo en contenedores)
+                # Columnas a mostrar en el dashboard simplificado (con información para entender la secuencia)
                 display_cols = [
                     'Part No', 
-                    'Descripcion', 
+                    'Descripcion',
+                    'Fecha_Embarque',  # Incluimos fecha para entender cuándo se necesita
                     'Contenedores_a_producir_limitado'  # Limitado por capacidad
                 ]
                 
                 # Filtrar solo las filas con contenedores a producir
                 display_df = priority_df[priority_df['Contenedores_a_producir_limitado'] > 0][display_cols].copy()
                 
+                # Formatear fechas para mejor visualización
+                display_df['Fecha_Embarque'] = display_df['Fecha_Embarque'].dt.strftime('%d-%m-%Y')
+                
                 # Renombrar columnas para mejor visualización
                 display_df.columns = [
                     'Número de Parte', 
-                    'Descripción', 
+                    'Descripción',
+                    'Embarque',
                     'Contenedores a Producir'
                 ]
                 
@@ -581,18 +626,32 @@ def main():
                 st.dataframe(styled_df, height=600)
                 
                 # Secuencia simplificada (texto)
-                st.subheader("Secuencia de producción recomendada")
+                st.subheader("Secuencia de producción eficiente")
                 
                 secuencia_texto = []
+                prev_part = None
+                part_count = 1
+                
                 for _, row in display_df.iterrows():
+                    current_part = row['Número de Parte']
+                    
+                    # Destacar cuando continuamos con la misma parte (eficiencia)
+                    if prev_part == current_part:
+                        prefix = f"{part_count}. **CONTINUAR** con"
+                        part_count += 1
+                    else:
+                        prefix = f"{part_count}. Producir"
+                        part_count += 1
+                        prev_part = current_part
+                    
                     secuencia_texto.append(
-                        f"**{int(row['Contenedores a Producir'])}** contenedores de **{row['Número de Parte']}** - {row['Descripción']}"
+                        f"{prefix} **{int(row['Contenedores a Producir'])}** contenedores de **{current_part}** - {row['Descripción']} (Embarque: {row['Embarque']})"
                     )
                 
                 if secuencia_texto:
-                    st.write("Producir en el siguiente orden:")
-                    for i, texto in enumerate(secuencia_texto, 1):
-                        st.markdown(f"{i}. {texto}")
+                    st.write("Seguir esta secuencia para máxima eficiencia:")
+                    for texto in secuencia_texto:
+                        st.markdown(texto)
                 else:
                     st.warning("No hay contenedores para producir.")
                 
