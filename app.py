@@ -292,6 +292,19 @@ def process_data(ref_df, prp_df, live_df, date_cols, parts_ref):
     ref_info = ref_df[['partno', 'pack', 'pack_faltante', 'customer']].rename(
         columns={'partno': 'Part No', 'customer': 'Customer_ref'}
     )
+    
+    # Incluir descripción si está disponible
+    if 'desc' in ref_df.columns:
+        ref_info['Descripcion'] = ref_df['desc']
+    else:
+        ref_info['Descripcion'] = 'N/A'
+        
+    # Incluir rate si está disponible
+    if 'rate' in ref_df.columns:
+        ref_info['Rate'] = ref_df['rate']
+    else:
+        ref_info['Rate'] = 100  # Default rate si no está disponible
+    
     base = base.merge(ref_info, on='Part No', how='left')
     
     # Definir cliente final (PRP o referencia)
@@ -340,7 +353,7 @@ def process_data(ref_df, prp_df, live_df, date_cols, parts_ref):
 
 @st.cache_data(ttl=1800)
 def compute_shortages(base_df, demand_df, date_range):
-    """Calcula faltantes y contenedores a producir."""
+    """Calcula faltantes y contenedores a producir, considerando requerimientos futuros."""
     if base_df.empty or demand_df.empty or not date_range:
         return pd.DataFrame()
     
@@ -352,6 +365,7 @@ def compute_shortages(base_df, demand_df, date_range):
     end_date = pd.Timestamp(end_date)
     demand_df['Fecha'] = pd.to_datetime(demand_df['Fecha'])
     
+    # Filtramos solo al rango seleccionado
     demand_filtered = demand_df[(demand_df['Fecha'] >= start_date) & (demand_df['Fecha'] <= end_date)]
     
     if demand_filtered.empty:
@@ -360,7 +374,7 @@ def compute_shortages(base_df, demand_df, date_range):
     # Merge base con demanda
     result = demand_filtered.merge(base_df, on='Part No', how='left')
     
-    # Calcular faltante
+    # Calcular faltante por día
     result['Faltante_pzs'] = np.maximum(0, result['Demanda_pzs'] - result['InvFG_pzs'])
     
     # Calcular contenedores a producir
@@ -374,32 +388,122 @@ def compute_shortages(base_df, demand_df, date_range):
         axis=1
     )
     
-    # Identificar partes con faltantes
-    part_has_shortage = result[result['Faltante_pzs'] > 0].groupby('Part No')['Fecha'].min().reset_index()
-    part_has_shortage.columns = ['Part No', 'Primera_fecha_faltante']
+    # Agrupar por número de parte para encontrar el primer día con faltante
+    part_first_shortage = result[result['Faltante_pzs'] > 0].groupby('Part No')['Fecha'].min().reset_index()
+    part_first_shortage.columns = ['Part No', 'Primera_fecha_faltante']
     
-    # Merge back
-    result = result.merge(part_has_shortage, on='Part No', how='left')
-    result['tiene_faltante'] = result['Primera_fecha_faltante'].notna()
+    # Calcular capacidad de producción por turno para cada parte
+    result['Capacidad_turno_pzs'] = result['Rate'] / 100 * 22.5  # 22.5 horas por turno * rate/100
+    result['Capacidad_turno_cont'] = np.floor(result['Capacidad_turno_pzs'] / result['pack'])
+    
+    # Para partes sin requerimiento inmediato, buscar próximos requerimientos
+    all_parts = base_df['Part No'].unique()
+    parts_with_shortages = part_first_shortage['Part No'].unique()
+    parts_without_shortage = [p for p in all_parts if p not in parts_with_shortages]
+    
+    # Si hay partes sin requerimientos inmediatos, buscaremos en fechas futuras
+    future_requirements = pd.DataFrame()
+    if parts_without_shortage:
+        future_demand = demand_df[(demand_df['Fecha'] > end_date) & 
+                                 demand_df['Part No'].isin(parts_without_shortage)]
+        
+        if not future_demand.empty:
+            # Encuentra el primer día con requerimiento futuro para cada parte
+            future_first_demand = future_demand.groupby('Part No').apply(
+                lambda x: x.loc[x['Demanda_pzs'] > 0, ['Fecha', 'Demanda_pzs']].iloc[0] 
+                if (x['Demanda_pzs'] > 0).any() else pd.Series({'Fecha': pd.NaT, 'Demanda_pzs': 0})
+            ).reset_index()
+            
+            # Solo mantenemos partes que tienen requerimientos futuros
+            future_first_demand = future_first_demand[future_first_demand['Fecha'].notna()]
+            
+            if not future_first_demand.empty:
+                # Crear filas para estos requerimientos futuros
+                for _, row in future_first_demand.iterrows():
+                    part_info = base_df[base_df['Part No'] == row['Part No']].iloc[0]
+                    faltante_pzs = row['Demanda_pzs'] - part_info['InvFG_pzs']
+                    if faltante_pzs > 0:
+                        contenedores = safe_ceil_division(faltante_pzs, part_info['pack'])
+                        
+                        future_row = {
+                            'Part No': row['Part No'],
+                            'Fecha': row['Fecha'],
+                            'Demanda_pzs': row['Demanda_pzs'],
+                            'InvFG_pzs': part_info['InvFG_pzs'],
+                            'Faltante_pzs': faltante_pzs,
+                            'pack': part_info['pack'],
+                            'Contenedores_a_producir': contenedores,
+                            'Cliente': part_info['Cliente'],
+                            'Descripcion': part_info['Descripcion'] if 'Descripcion' in part_info else 'N/A',
+                            'Rate': part_info['Rate'] if 'Rate' in part_info else 100,
+                            'Capacidad_turno_pzs': part_info['Rate'] / 100 * 22.5 if 'Rate' in part_info else 22.5,
+                            'Primera_fecha_faltante': row['Fecha'],
+                            'Es_requerimiento_futuro': True
+                        }
+                        
+                        future_requirements = pd.concat([future_requirements, pd.DataFrame([future_row])], ignore_index=True)
+    
+    # Unir resultados actuales con requerimientos futuros
+    if not future_requirements.empty:
+        result['Es_requerimiento_futuro'] = False
+        result = pd.concat([result, future_requirements], ignore_index=True)
+    else:
+        result['Es_requerimiento_futuro'] = False
+    
+    # Marcar si tiene faltante (actual o futuro)
+    result['tiene_faltante'] = result['Faltante_pzs'] > 0
     
     return result
 
 @st.cache_data(ttl=1800)
 def build_priority(shortage_df):
-    """Construye la tabla priorizada."""
+    """Construye la tabla priorizada y optimiza la producción por capacidad."""
     if shortage_df.empty:
         return pd.DataFrame()
     
     # Crear columna de prioridad de cliente
     shortage_df['cliente_priority'] = shortage_df['Cliente'].apply(customer_priority)
     
-    # Ordenar por prioridad
+    # Marcar prioridad especial para requerimientos futuros
+    if 'Es_requerimiento_futuro' in shortage_df.columns:
+        # Los requerimientos actuales tienen prioridad sobre los futuros
+        shortage_df['future_priority'] = shortage_df['Es_requerimiento_futuro'].astype(int)
+    else:
+        shortage_df['future_priority'] = 0
+    
+    # Ordenar por prioridad: primero faltantes, luego no-futuros, cliente, contenedores de más a menos
     priority_df = shortage_df.sort_values(
-        by=['tiene_faltante', 'cliente_priority', 'Contenedores_a_producir', 'Fecha'],
-        ascending=[False, True, False, True]
+        by=['tiene_faltante', 'future_priority', 'cliente_priority', 'Contenedores_a_producir'],
+        ascending=[False, True, True, False]
     )
     
-    return priority_df
+    # Agregar por número de parte (consolidar)
+    consolidated = priority_df.groupby('Part No').agg({
+        'Contenedores_a_producir': 'sum',
+        'Cliente': 'first',
+        'Descripcion': 'first',
+        'Rate': 'first',
+        'Capacidad_turno_cont': 'first',
+        'Primera_fecha_faltante': 'min',
+        'cliente_priority': 'first',
+        'tiene_faltante': 'any',
+        'future_priority': 'min',
+        'pack': 'first'
+    }).reset_index()
+    
+    # Reordenar nuevamente para priorizar
+    consolidated = consolidated.sort_values(
+        by=['tiene_faltante', 'future_priority', 'cliente_priority', 'Contenedores_a_producir'],
+        ascending=[False, True, True, False]
+    )
+    
+    # Limitar la producción a la capacidad del turno
+    consolidated['Contenedores_a_producir_limitado'] = np.minimum(
+        consolidated['Contenedores_a_producir'], 
+        consolidated['Capacidad_turno_cont']
+    )
+    
+    return consolidated
 
 def render_sequence(priority_df, date):
     """Genera secuencia de producción por día."""
@@ -465,7 +569,7 @@ def main():
         base_df, demand_df, nonusable_df = process_data(ref_df, prp_df, live_df, date_cols, parts_ref)
         
         if not base_df.empty and not demand_df.empty:
-            # Selector de rango de fechas
+            # Selector de rango de fechas (pero incluiremos búsqueda de requerimientos futuros)
             demand_df['Fecha'] = pd.to_datetime(demand_df['Fecha'])
             fechas_disponibles = sorted(demand_df['Fecha'].unique())
             if len(fechas_disponibles) > 0:
@@ -475,10 +579,18 @@ def main():
                 fecha_fin_max = fechas_disponibles[-1].date()
                 
                 date_range = st.sidebar.date_input(
-                    "Rango de fechas",
+                    "Rango de fechas para análisis inicial",
                     [fecha_inicio_default, min(fecha_fin_default, fecha_fin_max)],
                     min_value=fecha_inicio_default,
                     max_value=fecha_fin_max
+                )
+                
+                # Días adicionales a considerar para requerimientos futuros
+                dias_adicionales = st.sidebar.number_input(
+                    "Días adicionales para buscar requerimientos futuros",
+                    min_value=0,
+                    value=30,
+                    step=1
                 )
                 
                 # Validar rango de fechas
@@ -494,20 +606,33 @@ def main():
                         # Construir prioridad
                         priority_df = build_priority(shortages_df)
                         
-                        # Mostrar tabla de prioridad
-                        st.subheader("Tabla de prioridad de embarques")
+                        # Dashboard simplificado
+                        st.header("Plan de Producción de Contenedores")
                         
-                        # Columnas a mostrar
+                        # Columnas a mostrar en el dashboard simplificado
                         display_cols = [
-                            'Fecha', 'Part No', 'Cliente', 'InvFG_pzs', 'Demanda_pzs',
-                            'Faltante_pzs', 'pack', 'Contenedores_a_producir'
+                            'Part No', 
+                            'Descripcion', 
+                            'Cliente',
+                            'Contenedores_a_producir_limitado'  # Limitado por capacidad
+                        ]
+                        
+                        # Filtrar solo las filas con contenedores a producir
+                        display_df = priority_df[priority_df['Contenedores_a_producir_limitado'] > 0][display_cols].copy()
+                        
+                        # Renombrar columnas para mejor visualización
+                        display_df.columns = [
+                            'Número de Parte', 
+                            'Descripción', 
+                            'Cliente',
+                            'Contenedores a Producir'
                         ]
                         
                         # Función para color de semáforo
                         def highlight_row(row):
-                            contenedores = row['Contenedores_a_producir']
+                            contenedores = row['Contenedores a Producir']
                             if pd.isna(contenedores):
-                                return [''] * len(display_cols)
+                                return [''] * len(display_df.columns)
                             
                             if contenedores == 0:
                                 color = 'green'
@@ -516,52 +641,47 @@ def main():
                             else:
                                 color = 'red'
                             
-                            return [f'background-color: {color}; opacity: 0.3'] * len(display_cols)
+                            return [f'background-color: {color}; opacity: 0.3'] * len(display_df.columns)
                         
                         # Aplicar estilo
-                        display_df = priority_df[display_cols].copy()
-                        display_df['Fecha'] = display_df['Fecha'].dt.strftime('%Y-%m-%d')
-                        
-                        # Formatear tabla
                         styled_df = display_df.style.apply(highlight_row, axis=1)
-                        st.dataframe(styled_df)
                         
-                        # Secuencia por día
-                        st.subheader("Secuencia para el piso")
-                        # Asegurar que las fechas son datetime para poder ordenarlas y usar strftime
-                        priority_df['Fecha'] = pd.to_datetime(priority_df['Fecha'])
-                        unique_dates = sorted(priority_df['Fecha'].unique())
+                        # Mostrar dashboard simplificado
+                        st.dataframe(styled_df, height=600)
                         
-                        for date in unique_dates:
-                            with st.expander(f"**{date.strftime('%Y-%m-%d')}**"):
-                                st.markdown(render_sequence(priority_df, date))
+                        # Secuencia simplificada (texto)
+                        st.subheader("Secuencia de producción recomendada")
                         
-                        # Desglose de Non-Usable
-                        if not nonusable_df.empty:
-                            st.subheader("Desglose de No-Usable")
-                            
-                            nonusable_display = nonusable_df[[
-                                'Part No', 'EN PISO', 'En piso (cont)', 'CALIDAD', 
-                                'POSIBLE DEFECTUOSO', 'OTROS'
-                            ]]
-                            
-                            if 'NonUsable_prp' in nonusable_df.columns:
-                                nonusable_display = nonusable_display.merge(
-                                    nonusable_df[['Part No', 'NonUsable_prp', 'Suma_live', 'Δ']],
-                                    on='Part No',
-                                    how='left'
-                                )
-                            
-                            st.dataframe(nonusable_display)
+                        secuencia_texto = []
+                        for _, row in display_df.iterrows():
+                            secuencia_texto.append(
+                                f"**{int(row['Contenedores a Producir'])}** contenedores de **{row['Número de Parte']}** - {row['Descripción']} ({row['Cliente']})"
+                            )
+                        
+                        if secuencia_texto:
+                            st.write("Producir en el siguiente orden:")
+                            for i, texto in enumerate(secuencia_texto, 1):
+                                st.markdown(f"{i}. {texto}")
+                        else:
+                            st.warning("No hay contenedores para producir en el período analizado.")
                         
                         # Botón de descarga
-                        csv = priority_df.to_csv(index=False)
+                        csv = display_df.to_csv(index=False)
                         st.download_button(
                             label="Descargar plan (CSV)",
                             data=csv,
-                            file_name="plan_embarques.csv",
+                            file_name="plan_produccion.csv",
                             mime="text/csv"
                         )
+                        
+                        # Información adicional colapsable
+                        with st.expander("Ver inventario en piso (No-Usable)"):
+                            if not nonusable_df.empty:
+                                nonusable_display = nonusable_df[['Part No', 'EN PISO', 'En piso (cont)']]
+                                nonusable_display.columns = ['Número de Parte', 'Piezas en Piso', 'Contenedores en Piso']
+                                st.dataframe(nonusable_display)
+                            else:
+                                st.info("No hay información de inventario en piso disponible.")
                     else:
                         st.warning("No se encontraron datos para el rango de fechas seleccionado.")
                 else:
