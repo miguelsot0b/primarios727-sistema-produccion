@@ -288,8 +288,11 @@ def load_prp(url=PRP_URL):
     """Carga y procesa el archivo PRP."""
     df, timestamp = read_csv_url(url)
     
+    # Variable para almacenar la fecha de actualización del PRP
+    update_date = None
+    
     if df.empty:
-        return df, timestamp, []
+        return df, timestamp, [], update_date
     
     # Normalizar nombres de columnas
     df.columns = [str(col).strip() for col in df.columns]
@@ -318,7 +321,36 @@ def load_prp(url=PRP_URL):
     # Detectar columna de cliente
     customer_col = next((col for col in df.columns if 'primary customer' in str(col).lower()), None)
     
-    return df, timestamp, date_cols
+    # Extraer la fecha de actualización si está en la última columna
+    update_date = None
+    try:
+        # Obtener la última columna y su nombre
+        last_col = df.columns[-1]
+        
+        # Verificar si parece ser una columna de fecha de actualización
+        if 'update' in str(last_col).lower() or 'fecha' in str(last_col).lower() or 'date' in str(last_col).lower():
+            # Intentar convertir el primer valor a datetime
+            first_value = df[last_col].iloc[0] if len(df) > 0 else None
+            if first_value is not None:
+                # Si es un datetime, lo usamos directamente
+                if isinstance(first_value, pd.Timestamp):
+                    update_date = first_value
+                # Si es una cadena, intentamos convertirla
+                elif isinstance(first_value, str):
+                    try:
+                        update_date = pd.to_datetime(first_value)
+                    except:
+                        # Intentamos diferentes formatos comunes
+                        for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y', '%Y/%m/%d']:
+                            try:
+                                update_date = pd.to_datetime(first_value, format=fmt)
+                                break
+                            except:
+                                continue
+    except:
+        pass
+    
+    return df, timestamp, date_cols, update_date
 
 @st.cache_data(ttl=1800)
 def load_live(url=LIVE_URL):
@@ -522,9 +554,23 @@ def compute_shortages(base_df, demand_df, date_range=None):
         rate = part_info['Rate'] if 'Rate' in part_info else 100
         capacity_pcs = rate / 100 * 22.5
         
-        # Manejar casos especiales para pack
-        valid_pack = False if pd.isna(pack) else (pack > 0)
-        capacity_cont = 0 if not valid_pack else math.floor(capacity_pcs / pack)
+        # Manejar casos especiales para pack - asegurándonos que no hay división por cero
+        try:
+            # Primero verificamos si pack es NaN o None
+            if pd.isna(pack):
+                valid_pack = False
+                capacity_cont = 0
+            # Luego verificamos si es un número válido mayor que cero
+            elif isinstance(pack, (int, float)) and pack > 0:
+                valid_pack = True
+                capacity_cont = math.floor(capacity_pcs / pack)
+            else:
+                valid_pack = False
+                capacity_cont = 0
+        except:
+            # Si ocurre cualquier error, simplemente establecemos valores seguros
+            valid_pack = False
+            capacity_cont = 0
         
         # Banderas para optimización
         is_first_shortage = True
@@ -666,7 +712,7 @@ def main():
     
     # Cargar datos
     ref_df, ref_timestamp, parts_ref = load_ref()
-    prp_df, prp_timestamp, date_cols = load_prp()
+    prp_df, prp_timestamp, date_cols, prp_update_date = load_prp()
     live_df, live_timestamp = load_live()
     
     # Sidebar con diseño mejorado
@@ -674,8 +720,20 @@ def main():
     
     # Mostrar fecha y hora actual con mejor formato
     current_time = datetime.now().strftime('%d-%m-%Y %H:%M')
-    st.sidebar.markdown(f"**Última actualización:**")
+    st.sidebar.markdown(f"**Última actualización del sistema:**")
     st.sidebar.markdown(f"<div style='background-color: #DBEAFE; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold;'>{current_time}</div>", unsafe_allow_html=True)
+    
+    # Mostrar fecha de actualización del archivo PRP si está disponible
+    if prp_update_date is not None:
+        try:
+            # Formatear la fecha del PRP
+            prp_date_formatted = prp_update_date.strftime('%d-%m-%Y')
+            st.sidebar.markdown(f"**Última actualización del PRP:**")
+            st.sidebar.markdown(f"<div style='background-color: #FEF3C7; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold;'>{prp_date_formatted}</div>", unsafe_allow_html=True)
+        except:
+            # Si hay algún error al formatear, mostramos la fecha en formato raw
+            st.sidebar.markdown(f"**Última actualización del PRP:**")
+            st.sidebar.markdown(f"<div style='background-color: #FEF3C7; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold;'>{str(prp_update_date)}</div>", unsafe_allow_html=True)
     
     # Separador visual
     st.sidebar.markdown("<hr>", unsafe_allow_html=True)
