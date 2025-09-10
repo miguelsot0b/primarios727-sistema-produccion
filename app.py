@@ -266,7 +266,7 @@ def process_data(ref_df, prp_df, live_df, date_cols, parts_ref):
     for date_col in date_cols:
         if date_col in prp_filtered.columns:
             date_demand = prp_filtered.groupby(part_col_prp)[date_col].sum().reset_index()
-            date_demand['Fecha'] = pd.to_datetime(date_col, format='%m/%d/%Y', errors='coerce')
+            date_demand['Fecha'] = pd.to_datetime(date_col, format='%m/%d/%Y', errors='coerce').date()
             date_demand.columns = ['Part No', 'Demanda_pzs', 'Fecha']
             demand_by_date.append(date_demand)
     
@@ -346,6 +346,12 @@ def compute_shortages(base_df, demand_df, date_range):
     
     # Filtrar por rango de fechas
     start_date, end_date = date_range
+    
+    # Asegurar que todas las fechas sean del mismo tipo (datetime64[ns])
+    start_date = pd.Timestamp(start_date)
+    end_date = pd.Timestamp(end_date)
+    demand_df['Fecha'] = pd.to_datetime(demand_df['Fecha'])
+    
     demand_filtered = demand_df[(demand_df['Fecha'] >= start_date) & (demand_df['Fecha'] <= end_date)]
     
     if demand_filtered.empty:
@@ -460,21 +466,26 @@ def main():
         
         if not base_df.empty and not demand_df.empty:
             # Selector de rango de fechas
+            demand_df['Fecha'] = pd.to_datetime(demand_df['Fecha'])
             fechas_disponibles = sorted(demand_df['Fecha'].unique())
-            if fechas_disponibles:
-                fecha_inicio_default = fechas_disponibles[0]
-                fecha_fin_default = fecha_inicio_default + timedelta(days=13)
+            if len(fechas_disponibles) > 0:
+                # Convertir a datetime.date para date_input
+                fecha_inicio_default = fechas_disponibles[0].date()
+                fecha_fin_default = (fecha_inicio_default + timedelta(days=13))
+                fecha_fin_max = fechas_disponibles[-1].date()
                 
                 date_range = st.sidebar.date_input(
                     "Rango de fechas",
-                    [fecha_inicio_default, min(fecha_fin_default, fechas_disponibles[-1])],
-                    min_value=fechas_disponibles[0],
-                    max_value=fechas_disponibles[-1]
+                    [fecha_inicio_default, min(fecha_fin_default, fecha_fin_max)],
+                    min_value=fecha_inicio_default,
+                    max_value=fecha_fin_max
                 )
                 
                 # Validar rango de fechas
                 if isinstance(date_range, tuple) and len(date_range) == 2:
-                    start_date, end_date = date_range
+                    # Convertir a datetime64[ns] para asegurar compatibilidad
+                    start_date = pd.Timestamp(date_range[0])
+                    end_date = pd.Timestamp(date_range[1])
                     
                     # Calcular faltantes
                     shortages_df = compute_shortages(base_df, demand_df, (start_date, end_date))
@@ -517,6 +528,8 @@ def main():
                         
                         # Secuencia por día
                         st.subheader("Secuencia para el piso")
+                        # Asegurar que las fechas son datetime para poder ordenarlas y usar strftime
+                        priority_df['Fecha'] = pd.to_datetime(priority_df['Fecha'])
                         unique_dates = sorted(priority_df['Fecha'].unique())
                         
                         for date in unique_dates:
