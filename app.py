@@ -11,7 +11,7 @@ import time
 # Configuración de página
 # --------------------------
 st.set_page_config(
-    page_title="Prioridad de Embarques - Contenedores",
+    page_title="Próximos 3 Números de Parte a Producir",
     layout="wide"
 )
 
@@ -529,7 +529,7 @@ def render_sequence(priority_df, date):
 # UI
 # --------------------------
 def main():
-    st.title("Prioridad de Embarques - Contenedores")
+    st.title("PRÓXIMOS 3 NÚMEROS DE PARTE A PRODUCIR")
     
     # Sidebar
     st.sidebar.header("Configuración")
@@ -544,19 +544,14 @@ def main():
     prp_df, prp_timestamp, date_cols = load_prp()
     live_df, live_timestamp = load_live()
     
-    # Mostrar timestamps de actualización
+    # Mostrar solo última actualización
     st.sidebar.subheader("Última actualización")
-    st.sidebar.info(f"Referencia: {ref_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-    st.sidebar.info(f"PRP: {prp_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-    st.sidebar.info(f"Live Inventory: {live_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.sidebar.info(f"{datetime.now().strftime('%d-%m-%Y %H:%M')}")
     
-    # Configuración de semáforo
-    semaforo_threshold = st.sidebar.number_input(
-        "Umbral de semáforo (contenedores para rojo)",
-        min_value=1,
-        value=3,
-        step=1
-    )
+    # Botón para actualizar datos manualmente
+    if st.sidebar.button("Actualizar datos ahora"):
+        st.cache_data.clear()
+        st.experimental_rerun()
     
     # Procesar datos si están disponibles
     if not ref_df.empty and not prp_df.empty and date_cols:
@@ -580,7 +575,7 @@ def main():
                 priority_df = build_priority(shortages_df)
                 
                 # Dashboard simplificado
-                st.header("Plan de Producción de Contenedores")
+                # Eliminamos el encabezado del plan de producción ya que solo mostraremos los 5 próximos
                 
                 # Columnas a mostrar en el dashboard simplificado (con información para entender la secuencia)
                 display_cols = [
@@ -604,54 +599,59 @@ def main():
                     'Contenedores a Producir'
                 ]
                 
-                # Función para color de semáforo con mayor visibilidad
+                # Función para color de semáforo simplificado
                 def highlight_row(row):
                     contenedores = row['Contenedores a Producir']
                     if pd.isna(contenedores):
-                        return [''] * len(display_df.columns)
+                        return [''] * 3  # Solo tenemos 3 columnas ahora
                     
                     if contenedores == 0:
                         color = '#90EE90'  # Verde claro
-                    elif contenedores < semaforo_threshold:
-                        color = '#FFFF99'  # Amarillo claro
                     else:
                         color = '#FFCCCC'  # Rojo claro
                     
-                    return [f'background-color: {color}; font-weight: bold'] * len(display_df.columns)
+                    return [f'background-color: {color}; font-weight: bold'] * 3
                 
                 # Aplicar estilo
                 styled_df = display_df.style.apply(highlight_row, axis=1)
                 
-                # Mostrar dashboard simplificado
-                st.dataframe(styled_df, height=600)
+                # Mostrar solo los próximos 3 números de parte
+                st.subheader("PRÓXIMOS 3 NÚMEROS DE PARTE A PRODUCIR")
+                
+                # Agrupar por número de parte y sumar los contenedores
+                grouped_df = display_df.groupby(['Número de Parte', 'Descripción']).agg({
+                    'Contenedores a Producir': 'sum'
+                }).reset_index()
+                
+                # Ordenar por mayor número de contenedores primero
+                grouped_df = grouped_df.sort_values('Contenedores a Producir', ascending=False)
+                
+                # Limitamos a los primeros 3 números de parte
+                limited_df = grouped_df.head(3).copy()
+                
+                # Mostrar la tabla limitada
+                st.dataframe(limited_df[['Número de Parte', 'Descripción', 'Contenedores a Producir']].style.apply(highlight_row, axis=1), hide_index=True)
                 
                 # Secuencia simplificada (texto)
-                st.subheader("Secuencia de producción eficiente")
-                
                 secuencia_texto = []
-                prev_part = None
-                part_count = 1
                 
-                for _, row in display_df.iterrows():
+                # Mostrar los 3 números de parte y cuántos contenedores
+                for i, (_, row) in enumerate(limited_df.iterrows(), 1):
+                    if i > 3:  # Limitar a solo 3 números de parte
+                        break
+                        
                     current_part = row['Número de Parte']
-                    
-                    # Destacar cuando continuamos con la misma parte (eficiencia)
-                    if prev_part == current_part:
-                        prefix = f"{part_count}. **CONTINUAR** con"
-                        part_count += 1
-                    else:
-                        prefix = f"{part_count}. Producir"
-                        part_count += 1
-                        prev_part = current_part
-                    
                     secuencia_texto.append(
-                        f"{prefix} **{int(row['Contenedores a Producir'])}** contenedores de **{current_part}** - {row['Descripción']} (Embarque: {row['Embarque']})"
+                        f"{i}. Producir **{int(row['Contenedores a Producir'])}** contenedores de **{current_part}** - {row['Descripción']}"
                     )
                 
                 if secuencia_texto:
-                    st.write("Seguir esta secuencia para máxima eficiencia:")
+                    st.write("Plan de producción actual:")
                     for texto in secuencia_texto:
                         st.markdown(texto)
+                    
+                    # Nota sobre actualización automática
+                    st.info("Los datos se actualizan automáticamente cada 30 minutos. Puede usar el botón 'Actualizar datos ahora' en el panel lateral para forzar una actualización inmediata.")
                 else:
                     st.warning("No hay contenedores para producir.")
                 
